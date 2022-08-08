@@ -1,0 +1,286 @@
+---
+4title: DDS Final
+author: "Keith Sikes"
+date: "2022-08-03"
+output:
+  pdf_document: default
+  word_document: default
+  html_document: default
+---
+
+```{r}
+install.packages("caret")
+install.packages("rlang")
+library(tidyverse)
+library(rlang)
+library(caret)
+library(klaR)
+```
+
+
+
+
+```{r}
+setwd("~/Personal/Rcoding/Final Project")
+
+data_i <- read_csv("CaseStudy2-data.csv")
+```
+
+For this data set we wanted to pull out everyone who was 55 or over to show if they were quitting, retiring, or staying with the company.
+
+```{r}
+
+d_retired = data_i %>% 
+  mutate(Retired = ifelse(Attrition == "Yes" & Age >=55, "Yes", "No") ) %>% 
+  mutate(Attrition_Detail = ifelse(Retired == "Yes", "Retired", ifelse(Attrition == "Yes", "Quit", "Stayed") ) ) %>% 
+  group_by(Attrition_Detail) %>% summarise(Count = n()) %>% 
+  mutate(Pct = round(Count / sum(Count),2))
+
+```
+
+In these charts we pulled out several of the key factors that related to attrition. We seperated data out of each column, created a mean of attrition, and showed an average for how many stayed vs the amount left.The last two charts show the ages that people left and the results from type of attrition.
+
+```{r}
+
+to_convert = c("Education","EnvironmentSatisfaction","JobInvolvement","JobLevel","JobSatisfaction","NumCompaniesWorked","PerformanceRating","RelationshipSatisfaction","StockOptionLevel","TrainingTimesLastYear","WorkLifeBalance","BusinessTravel")
+data = data_i %>% 
+  mutate(across(all_of(to_convert), as.character, .names = "{col}_CAT" )) %>%  
+  filter(! (Attrition == "Yes" & Age >=55) )  
+
+
+for(col in colnames(data)){
+  plot_list = list()
+  if(typeof(data[[col]]) == "character" & col != "Attrition" ){
+    d_group = data %>% group_by(!!sym(col) ) %>% 
+      mutate(Attrition_TF = Attrition == "Yes") %>% 
+      summarise(Mean = mean(Attrition_TF), Count = n() )
+    plot = ggplot(d_group, aes(!!sym(col), Mean)) + geom_col() + ggtitle(col) +
+      geom_text(aes(label = Count), nudge_y = .01) +
+  theme(plot.title = element_text(hjust = 0.5))
+    print(plot)
+  }
+}
+
+ggplot(data = data_i, aes(x = Age)) + 
+  geom_histogram(color="snow4", fill="#8B8989") +
+  ggtitle("Age of Attrition") +
+  xlab("Age") +
+  ylab("Quantity") +
+  theme(axis.text = element_text(colour = "black", size = 10)) +
+  theme(panel.background = element_rect(fill = "white")) +
+  theme(panel.border = element_rect(colour = "black", fill=NA, size = 0.75)) +
+  theme(plot.title = element_text(hjust = 0.5))
+
+ggplot(data = d_retired, aes(x = Count, y = Attrition_Detail )) + 
+  geom_col(color="snow4", fill="#8B8989") + coord_flip() +
+  ggtitle("Types of Attrition") +
+  xlab("Attrition") +
+  ylab("Count") +
+  theme(axis.text = element_text(colour = "black", size = 10)) +
+  theme(panel.background = element_rect(fill = "white")) +
+  theme(panel.border = element_rect(colour = "black", fill=NA, size = 0.75)) +
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+In this Naive Bayes confustion matrix model we show the amount of people to expect to leave vs those that will stay within an 78% accuracy.
+
+```{r}
+
+#use numcompanieswork, jobrole, overtime
+#make the data for the ML model
+vars_for_model = c("OverTime","IsSatisfied","IsSalesRep","IsInvolved","IsHigherJobLevel","IsStockOption_0_3","WorkLifeBalance")
+d_ml = data %>% 
+  mutate(IsSatisfied = EnvironmentSatisfaction > 1) %>% 
+  mutate(IsSalesRep = (JobRole == "Sales Representative") ) %>% 
+  mutate(IsInvolved = JobInvolvement > 1) %>% 
+  mutate(IsHigherJobLevel = JobLevel > 1) %>% 
+  mutate(IsStockOption_0_3 = StockOptionLevel %in% c(0,3)) %>% 
+  mutate(WorkLifeBalance = WorkLifeBalance > 1) %>% 
+  mutate(across(.cols = everything(), as.factor)) %>% 
+  mutate(Attrition = factor(Attrition, levels = c("Yes","No"))) %>% 
+  dplyr::select(Attrition, all_of(vars_for_model))
+rownames(d_ml) <- NULL
+
+library(caTools)
+library(e1071)
+
+#break into training and test sets(without caret)
+set.seed(101) 
+trainIndex = sample.split(d_ml$Attrition, SplitRatio = .7)
+d_train <- d_ml[ trainIndex,]
+d_test  <- d_ml[-trainIndex,]
+
+#calculate ratio between yes's and no's
+num_yes = d_train %>% filter(Attrition=="Yes") %>% nrow()
+num_no = nrow(d_train) - num_yes
+ratio = round(num_no / num_yes)
+
+#generate the needed # of samples to add yes's
+to_add = tibble()
+for(i in 1:(ratio-0) ){
+  to_add = bind_rows(to_add, d_train %>% filter(Attrition=="Yes") ) 
+}
+
+#add rows to d_ml
+d_train = d_train %>% bind_rows(to_add)
+
+#Make a dataframe from X and Y
+X_train = d_train %>% dplyr::select(-Attrition)
+y_train = d_train %>% dplyr::select(Attrition)
+
+#
+X_test = d_test %>% dplyr::select(-Attrition)
+y_test = d_test %>% dplyr::select(Attrition)
+
+#
+model = train(X_train,y_train$Attrition,'nb') #,trControl=trainControl(method='cv',number=10)
+
+#confusion matrix
+conf_mat = table(predict(model$finalModel,X_test)$class,y_test$Attrition)
+conf_mat_pct = prop.table(conf_mat) %>% round(2)
+conf_mat
+conf_mat_pct
+
+# calculate sensitity
+pred = predict(model$finalModel,X_test)$class
+truth = y_test$Attrition
+sensitivity(pred, truth)
+specificity(pred, truth)
+```
+
+
+```{r}
+#FOR TRAINING SET
+
+#confusion matrix
+conf_mat = table(predict(model$finalModel,X_train)$class,y_train$Attrition)
+conf_mat_pct = prop.table(conf_mat) %>% round(2)
+conf_mat
+conf_mat_pct
+
+# calculate sensitity
+pred = predict(model$finalModel,X_train)$class
+truth = y_train$Attrition
+sensitivity(pred, truth)
+specificity(pred, truth)
+
+```
+Now we have to import the data without attrition and predict if they will leave or stay
+```{r}
+noattdata <- read_csv("https://raw.githubusercontent.com/sikesmaurice/sikesmaurice.github.io/main/CaseStudy2CompSet%2BNo%2BAttrition.csv")
+
+#vars_for_model = c("OverTime","IsSatisfied","IsSalesRep","IsInvolved","IsHigherJobLevel","IsStockOption_0_3","WorkLifeBalance")
+noattdatamutate = noattdata %>% 
+  mutate(IsSatisfied = EnvironmentSatisfaction > 1) %>% 
+  mutate(IsSalesRep = (JobRole == "Sales Representative") ) %>% 
+  mutate(IsInvolved = JobInvolvement > 1) %>% 
+  mutate(IsHigherJobLevel = JobLevel > 1) %>% 
+  mutate(IsStockOption_0_3 = StockOptionLevel %in% c(0,3)) %>% 
+  mutate(WorkLifeBalance = WorkLifeBalance > 1) %>% 
+  mutate(across(.cols = everything(), as.factor))
+rownames(noattdatamutate) <- NULL
+
+noattdatamutate = noattdatamutate[ , c("OverTime","IsSatisfied","IsSalesRep","IsInvolved","IsHigherJobLevel","IsStockOption_0_3","WorkLifeBalance")]
+
+noattdatamutate$Attrition <- predict(model$finalModel, noattdatamutate)$class
+
+NoAtExport <- data.frame(ID = noattdata$ID, Attrition = noattdatamutate$Attrition)
+
+write.csv(NoAtExport, file = file.choose(new = T), row.names = FALSE)
+
+```
+
+# Salary Prediction
+
+What factors in the data have an effect on salary
+
+```{r}
+
+data <- read_csv("https://raw.githubusercontent.com/sikesmaurice/sikesmaurice.github.io/main/CaseStudy2-data.csv")
+
+# Too Many Unique Variables - Business Travel, Education Field, Department, Job Role, 
+
+# IncomeNumberData <- select(data, -c("BusinessTravel", "EducationField", "Department", "JobRole", "DistanceFromHome", "ID", "Over18", "StandardHours", "MaritalStatus", "EmployeeNumber", "EmployeeCount"))
+
+DirtyIncomeData <- which(colnames(data) %in% c("BusinessTravel", "EducationField", "Department", "JobRole", "DistanceFromHome", "ID", "Over18", "StandardHours", "MaritalStatus", "EmployeeNumber", "EmployeeCount"))
+
+IncomeNumberData <- data[,-DirtyIncomeData]
+
+IncomeNumberData$Gender <- as.factor(IncomeNumberData$Gender)
+IncomeNumberData$Attrition <- as.factor(IncomeNumberData$Attrition)
+IncomeNumberData$OverTime <- as.factor(IncomeNumberData$OverTime)
+
+IncomeNumberData$Gender <- as.numeric(IncomeNumberData$Gender)
+IncomeNumberData$Attrition <- as.numeric(IncomeNumberData$Attrition)
+IncomeNumberData$OverTime <- as.numeric(IncomeNumberData$OverTime)
+
+CorMat <- cor(IncomeNumberData)
+MonInCor <- CorMat[,"MonthlyIncome"] # Shows relationship to Monthly Income Value (The closer to zero, the less correlation).
+MonInCor[MonInCor>0.3]
+# MonInCor[MonInCor<-0.3] Nothing was less than -0.3
+
+# Variables to include: "Age", "JobLevel", "MonthlyIncome", "TotalWorkingYears", "YearsAtCompany", "YearsInCurrentRole", "YearsSinceLastPromotion", "YearsWithCurrManager"
+
+```
+# Making the Linear Regression Model to Predict Salary
+
+In this Linear Regression Model we are able to show that the RMSE is $1273.571
+```{r}
+
+library(Metrics)
+
+#Splitting the Data Set into Training and Test
+
+set.seed(900)
+Salary_Train <- createDataPartition(IncomeNumberData$MonthlyIncome, p = .8, list = FALSE, times = 1)
+S_train <- IncomeNumberData[ Salary_Train,]
+S_test  <- IncomeNumberData[-Salary_Train,]
+S_cl <- S_test$MonthlyIncome
+
+Sx_Test <- which(colnames(S_test) %in% c("MonthlyIncome"))
+Sy_test1 <- S_test[,-Sx_Test]
+
+# SalaryModel1 <- lm(MonthlyIncome ~ Age + JobLevel + TotalWorkingYears + YearsAtCompany + YearsInCurrentRole + YearsWithCurrManager, data = IncomeNumberData)
+
+# Remove factors without stars by pvalues
+
+SalaryModel <- lm(MonthlyIncome ~ JobLevel + TotalWorkingYears + YearsWithCurrManager, data = S_train)
+
+SalaryPred <- predict(SalaryModel,Sy_test1)
+rmse(SalaryPred, S_test$MonthlyIncome)
+
+summary(SalaryModel)
+
+```
+```{R}
+
+NoSalary <- read_csv("https://raw.githubusercontent.com/sikesmaurice/sikesmaurice.github.io/main/CaseStudy2CompSet%2BNo%2BSalary.csv")
+
+NoSalaryFiltered <- NoSalary[,c("JobLevel", "TotalWorkingYears", "YearsWithCurrManager")]
+
+NoSalaryPred <- predict(SalaryModel, NoSalaryFiltered)
+
+NoSalaryExport <- data.frame(ID = NoSalary$ID, MonthlySalary = NoSalaryPred)
+
+write.csv(NoSalaryExport, file = file.choose(new = T), row.names = FALSE)
+
+```
+# Visualizing the Data
+
+Since we now know 
+
+```{R}
+
+NoSalary <- read_csv("https://raw.githubusercontent.com/BStrzalkowski/Data-Science-Project-2-/main/CaseStudy2CompSetNoSalary.csv")
+
+NoSalaryFiltered <- NoSalary[,c("JobLevel", "TotalWorkingYears", "YearsWithCurrManager")]
+
+NoSalaryHat <- predict(SalaryModel, NoSalaryFiltered)
+
+NoSalaryExport <- data.frame(ID = NoSalary$ID, MonthlySalary = NoSalaryHat)
+
+write.csv(NoSalaryExport, file = file.choose(new = T), row.names = FALSE)
+
+```
+
